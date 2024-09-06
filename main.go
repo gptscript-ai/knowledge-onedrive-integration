@@ -32,10 +32,10 @@ func (s StaticTokenCredential) GetToken(ctx context.Context, options policy.Toke
 }
 
 type FileDetails struct {
-	Name    string
-	URL     string
-	Updated string
-	Sync    bool
+	FileName  string `json:"fileName"`
+	URL       string `json:"url"`
+	UpdatedAt string `json:"updatedAt"`
+	Sync      bool   `json:"sync"`
 }
 
 func main() {
@@ -90,7 +90,7 @@ func main() {
 	for _, item := range driveItems.GetValue() {
 		if detail, ok := metadata[*item.GetId()]; ok {
 			if detail.Sync {
-				downloadPath := path.Join(dataPath, *item.GetId(), detail.Name)
+				downloadPath := path.Join(dataPath, *item.GetId(), detail.FileName)
 				if _, err := os.Stat(path.Join(dataPath, *item.GetId())); err != nil {
 					err := os.MkdirAll(path.Join(dataPath, *item.GetId()), 0755)
 					if err != nil {
@@ -98,7 +98,7 @@ func main() {
 						os.Exit(1)
 					}
 				}
-				if _, err := os.Stat(downloadPath); err != nil || detail.Updated != (*item.GetLastModifiedDateTime()).String() {
+				if _, err := os.Stat(downloadPath); err != nil || detail.UpdatedAt != (*item.GetLastModifiedDateTime()).String() {
 					{
 						data, err := client.Drives().ByDriveId(*drive.GetId()).Items().ByDriveItemId(*item.GetId()).Content().Get(ctx, nil)
 						if err != nil {
@@ -115,15 +115,15 @@ func main() {
 					}
 				}
 			}
-			detail.Name = *item.GetName()
+			detail.FileName = *item.GetName()
 			detail.URL = *item.GetWebUrl()
-			detail.Updated = (*item.GetLastModifiedDateTime()).String()
+			detail.UpdatedAt = (*item.GetLastModifiedDateTime()).String()
 			metadata[*item.GetId()] = detail
 		} else {
 			metadata[*item.GetId()] = FileDetails{
-				Name:    *item.GetName(),
-				URL:     *item.GetWebUrl(),
-				Updated: (*item.GetLastModifiedDateTime()).String(),
+				FileName:  *item.GetName(),
+				URL:       *item.GetWebUrl(),
+				UpdatedAt: (*item.GetLastModifiedDateTime()).String(),
 			}
 		}
 	}
