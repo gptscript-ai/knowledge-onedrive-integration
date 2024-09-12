@@ -11,13 +11,28 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	drives2 "github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/shares"
 	"github.com/sirupsen/logrus"
 )
+
+type Metadata struct {
+	Input  MetadataInput  `json:"input"`
+	Output MetadataOutput `json:"output"`
+}
+
+type MetadataInput struct {
+	SharedLinks []string `json:"sharedLinks"`
+}
+
+type MetadataOutput struct {
+	Status  string                 `json:"status"`
+	Error   string                 `json:"error"`
+	Files   map[string]FileDetails `json:"files"`
+	Folders map[string]struct{}    `json:"folders"`
+}
 
 type StaticTokenCredential struct {
 	token string
@@ -36,11 +51,9 @@ func (s StaticTokenCredential) GetToken(ctx context.Context, options policy.Toke
 }
 
 type FileDetails struct {
-	FileName    string `json:"fileName"`
-	DisplayName string `json:"displayName"`
-	URL         string `json:"url"`
-	UpdatedAt   string `json:"updatedAt"`
-	Sync        bool   `json:"sync"`
+	FilePath  string `json:"filePath"`
+	URL       string `json:"url"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 func main() {
@@ -51,70 +64,63 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
-	drive, err := client.Me().Drive().Get(ctx, nil)
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
-
-	metadata := map[string]FileDetails{}
-	externalLinks := map[string]string{}
-	dataPath := path.Join(os.Getenv("WORKSPACE_DIR"), "knowledge", "integrations", "onedrive")
-	metadataPath := path.Join(dataPath, "metadata.json")
-	externalLinkPath := path.Join(dataPath, "externalLinks.json")
-	if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-		err := os.MkdirAll(dataPath, 0755)
+	workingDir := os.Getenv("GPTSCRIPT_WORKSPACE_DIR")
+	if workingDir == "" {
+		workingDir, err = os.Getwd()
 		if err != nil {
 			logrus.Error(err)
 			os.Exit(1)
 		}
-	} else {
-		if _, err := os.Stat(metadataPath); err == nil {
-			data, err := os.ReadFile(metadataPath)
-			if err != nil {
-				logrus.Error(err)
-				os.Exit(1)
-			}
-
-			err = json.Unmarshal(data, &metadata)
-			if err != nil {
-				logrus.Error(err)
-				os.Exit(1)
-			}
-		}
-
-		if _, err := os.Stat(externalLinkPath); err == nil {
-			data, err := os.ReadFile(externalLinkPath)
-			if err != nil {
-				logrus.Error(err)
-				os.Exit(1)
-			}
-
-			err = json.Unmarshal(data, &externalLinks)
-			if err != nil {
-				logrus.Error(err)
-				os.Exit(1)
-			}
-		}
 	}
 
-	config := drives2.ItemItemsRequestBuilderGetRequestConfiguration{
-		QueryParameters: &drives2.ItemItemsRequestBuilderGetQueryParameters{
-			Filter: to.Ptr("file ne null"),
-		},
+	metadata := Metadata{}
+	metadataPath := path.Join(workingDir, "metadata.json")
+	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+		logrus.Error("metadata.json not found")
+		os.Exit(1)
 	}
-	driveItems, err := client.Drives().ByDriveId(*drive.GetId()).Items().Get(ctx, &config)
+	data, err := os.ReadFile(metadataPath)
 	if err != nil {
 		logrus.Error(err)
 		os.Exit(1)
 	}
 
-	if err := saveToMetadata(ctx, *drive.GetId(), metadata, client, dataPath, driveItems.GetValue()); err != nil {
+	err = json.Unmarshal(data, &metadata)
+	if err != nil {
 		logrus.Error(err)
 		os.Exit(1)
 	}
 
-	for link := range externalLinks {
+	if metadata.Output.Files == nil {
+		metadata.Output.Files = make(map[string]FileDetails)
+	}
+
+	if metadata.Output.Folders == nil {
+		metadata.Output.Folders = make(map[string]struct{})
+	}
+
+	if err := sync(ctx, metadata, client, workingDir, metadataPath); err != nil {
+		metadata.Output.Error = err.Error()
+		if err := writeMetadata(metadata, metadataPath); err != nil {
+			logrus.Error(err)
+		}
+		os.Exit(1)
+	}
+
+	metadata.Output.Status = "Done"
+	metadata.Output.Error = ""
+	if err := writeMetadata(metadata, metadataPath); err != nil {
+		logrus.Error(err)
+		os.Exit(1)
+	}
+}
+
+func sync(ctx context.Context, metadata Metadata, client *msgraphsdk.GraphServiceClient, workingDir string, metadataPath string) error {
+	items := make(map[string]struct {
+		Item models.DriveItemable
+		Root string
+	})
+	for _, link := range metadata.Input.SharedLinks {
 		requestParameters := &shares.ItemDriveItemRequestBuilderGetQueryParameters{
 			Expand: []string{"children"},
 		}
@@ -123,35 +129,37 @@ func main() {
 		}
 		shareDriveItem, err := client.Shares().BySharedDriveItemId(encodeURL(link)).DriveItem().Get(ctx, configuration)
 		if err != nil {
-			logrus.Error(err)
-			os.Exit(1)
+			return err
 		}
+		root := path.Dir(getFullName(shareDriveItem))
 
-		driveID := *shareDriveItem.GetParentReference().GetDriveId()
 		children, err := getChildrenFileForItem(ctx, client, shareDriveItem)
-
 		if err != nil {
-			logrus.Error(err)
-			os.Exit(1)
+			return err
 		}
-
-		if err := saveToMetadata(ctx, driveID, metadata, client, dataPath, children); err != nil {
-			logrus.Error(err)
-			os.Exit(1)
+		for _, child := range children {
+			items[*child.GetId()] = struct {
+				Item models.DriveItemable
+				Root string
+			}{
+				Item: child,
+				Root: root,
+			}
 		}
 	}
+	if err := saveToMetadata(ctx, metadata, client, workingDir, metadataPath, items); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func writeMetadata(metadata Metadata, path string) error {
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
+		return err
 	}
-	err = os.WriteFile(metadataPath, data, 0644)
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
-	logrus.Info(fmt.Sprintf("Saved metadata to %s", metadataPath))
+	return os.WriteFile(path, data, 0644)
 }
 
 func getChildrenFileForItem(ctx context.Context, client *msgraphsdk.GraphServiceClient, item models.DriveItemable) ([]models.DriveItemable, error) {
@@ -178,50 +186,82 @@ func getChildrenFileForItem(ctx context.Context, client *msgraphsdk.GraphService
 	return result, nil
 }
 
-func saveToMetadata(ctx context.Context, driveID string, metadata map[string]FileDetails, client *msgraphsdk.GraphServiceClient, dataPath string, items []models.DriveItemable) error {
+func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.GraphServiceClient, dataPath string, metadataPath string, items map[string]struct {
+	Item models.DriveItemable
+	Root string
+}) error {
+	folders := make(map[string]struct{})
 	for _, item := range items {
-		if detail, ok := metadata[*item.GetId()]; ok {
-			if detail.Sync {
-				downloadPath := path.Join(dataPath, *item.GetId(), detail.FileName)
-				if _, err := os.Stat(path.Join(dataPath, *item.GetId())); err != nil {
-					err := os.MkdirAll(path.Join(dataPath, *item.GetId()), 0755)
-					if err != nil {
-						return err
-					}
-				}
-				if _, err := os.Stat(downloadPath); err != nil || detail.UpdatedAt != (*item.GetLastModifiedDateTime()).String() {
-					{
-						data, err := client.Drives().ByDriveId(driveID).Items().ByDriveItemId(*item.GetId()).Content().Get(ctx, nil)
-						if err != nil {
-							return err
-						}
-
-						err = os.WriteFile(downloadPath, data, 0644)
-						if err != nil {
-							return err
-						}
-						logrus.Info(fmt.Sprintf("Downloaded %s", downloadPath))
-					}
-				}
-			}
-			detail.DisplayName = getDisplayName(item)
-			detail.FileName = *item.GetName()
-			detail.URL = *item.GetWebUrl()
-			detail.UpdatedAt = (*item.GetLastModifiedDateTime()).String()
-			metadata[*item.GetId()] = detail
-		} else {
-			metadata[*item.GetId()] = FileDetails{
-				FileName:    *item.GetName(),
-				DisplayName: getDisplayName(item),
-				URL:         *item.GetWebUrl(),
-				UpdatedAt:   (*item.GetLastModifiedDateTime()).String(),
+		fullPath := getFullName(item.Item)
+		relativePath := strings.TrimPrefix(fullPath, item.Root)
+		downloadPath := path.Join(dataPath, relativePath)
+		topRootFolder := strings.Split(strings.TrimPrefix(relativePath, string(os.PathSeparator)), string(os.PathSeparator))[0]
+		detail, ok := metadata.Output.Files[*item.Item.GetId()]
+		if !ok {
+			detail.FilePath = downloadPath
+			detail.URL = *item.Item.GetWebUrl()
+			detail.UpdatedAt = (*item.Item.GetLastModifiedDateTime()).String()
+			metadata.Output.Files[*item.Item.GetId()] = detail
+		}
+		if _, err := os.Stat(path.Dir(downloadPath)); err != nil {
+			err := os.MkdirAll(path.Dir(downloadPath), 0755)
+			if err != nil {
+				return err
 			}
 		}
+		if _, err := os.Stat(downloadPath); err != nil || detail.UpdatedAt != item.Item.GetLastModifiedDateTime().String() {
+			{
+				driveID := *item.Item.GetParentReference().GetDriveId()
+				data, err := client.Drives().ByDriveId(driveID).Items().ByDriveItemId(*item.Item.GetId()).Content().Get(ctx, nil)
+				if err != nil {
+					return err
+				}
+
+				err = os.WriteFile(downloadPath, data, 0644)
+				if err != nil {
+					return err
+				}
+				logrus.Info(fmt.Sprintf("Downloaded %s", downloadPath))
+			}
+		}
+		folders[topRootFolder] = struct{}{}
+		metadata.Output.Folders[topRootFolder] = struct{}{}
+		metadata.Output.Status = fmt.Sprintf("Synced %d files out of %d", len(metadata.Output.Files), len(items))
+		if err := writeMetadata(metadata, metadataPath); err != nil {
+			return err
+		}
 	}
+	for id := range metadata.Output.Files {
+		found := false
+		if _, ok := items[id]; ok {
+			found = true
+		}
+		if !found {
+			if metadata.Output.Files[id].FilePath != "" {
+				logrus.Infof("Deleting %s", metadata.Output.Files[id].FilePath)
+				downloadPath := path.Join(dataPath, metadata.Output.Files[id].FilePath)
+				if err := os.RemoveAll(downloadPath); err != nil {
+					return err
+				}
+			}
+			delete(metadata.Output.Files, id)
+		}
+	}
+
+	for folder := range metadata.Output.Folders {
+		if _, ok := folders[folder]; !ok {
+			logrus.Infof("Deleting folder %s", folder)
+			if err := os.RemoveAll(strings.TrimRight(folder, "/")); err != nil {
+				return err
+			}
+			delete(metadata.Output.Folders, folder)
+		}
+	}
+
 	return nil
 }
 
-func getDisplayName(item models.DriveItemable) string {
+func getFullName(item models.DriveItemable) string {
 	p := item.GetParentReference().GetPath()
 	if p != nil {
 		_, after, found := strings.Cut(*p, ":")
