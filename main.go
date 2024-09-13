@@ -11,7 +11,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	drives2 "github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -51,11 +50,6 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
-	drive, err := client.Me().Drive().Get(ctx, nil)
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
 
 	metadata := map[string]FileDetails{}
 	externalLinks := map[string]string{}
@@ -98,22 +92,7 @@ func main() {
 		}
 	}
 
-	config := drives2.ItemItemsRequestBuilderGetRequestConfiguration{
-		QueryParameters: &drives2.ItemItemsRequestBuilderGetQueryParameters{
-			Filter: to.Ptr("file ne null"),
-		},
-	}
-	driveItems, err := client.Drives().ByDriveId(*drive.GetId()).Items().Get(ctx, &config)
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
-
-	if err := saveToMetadata(ctx, *drive.GetId(), metadata, client, dataPath, driveItems.GetValue()); err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
-
+	items := map[string]models.DriveItemable{}
 	for link := range externalLinks {
 		requestParameters := &shares.ItemDriveItemRequestBuilderGetQueryParameters{
 			Expand: []string{"children"},
@@ -127,18 +106,19 @@ func main() {
 			os.Exit(1)
 		}
 
-		driveID := *shareDriveItem.GetParentReference().GetDriveId()
 		children, err := getChildrenFileForItem(ctx, client, shareDriveItem)
-
 		if err != nil {
 			logrus.Error(err)
 			os.Exit(1)
 		}
-
-		if err := saveToMetadata(ctx, driveID, metadata, client, dataPath, children); err != nil {
-			logrus.Error(err)
-			os.Exit(1)
+		for _, child := range children {
+			items[*child.GetId()] = child
 		}
+	}
+
+	if err := saveToMetadata(ctx, metadata, client, dataPath, items); err != nil {
+		logrus.Error(err)
+		os.Exit(1)
 	}
 
 	data, err := json.MarshalIndent(metadata, "", "  ")
@@ -178,7 +158,7 @@ func getChildrenFileForItem(ctx context.Context, client *msgraphsdk.GraphService
 	return result, nil
 }
 
-func saveToMetadata(ctx context.Context, driveID string, metadata map[string]FileDetails, client *msgraphsdk.GraphServiceClient, dataPath string, items []models.DriveItemable) error {
+func saveToMetadata(ctx context.Context, metadata map[string]FileDetails, client *msgraphsdk.GraphServiceClient, dataPath string, items map[string]models.DriveItemable) error {
 	for _, item := range items {
 		if detail, ok := metadata[*item.GetId()]; ok {
 			if detail.Sync {
@@ -191,7 +171,7 @@ func saveToMetadata(ctx context.Context, driveID string, metadata map[string]Fil
 				}
 				if _, err := os.Stat(downloadPath); err != nil || detail.UpdatedAt != (*item.GetLastModifiedDateTime()).String() {
 					{
-						data, err := client.Drives().ByDriveId(driveID).Items().ByDriveItemId(*item.GetId()).Content().Get(ctx, nil)
+						data, err := client.Drives().ByDriveId(*item.GetParentReference().GetDriveId()).Items().ByDriveItemId(*item.GetId()).Content().Get(ctx, nil)
 						if err != nil {
 							return err
 						}
@@ -216,6 +196,12 @@ func saveToMetadata(ctx context.Context, driveID string, metadata map[string]Fil
 				URL:         *item.GetWebUrl(),
 				UpdatedAt:   (*item.GetLastModifiedDateTime()).String(),
 			}
+		}
+	}
+
+	for id := range metadata {
+		if _, ok := items[id]; !ok {
+			delete(metadata, id)
 		}
 	}
 	return nil
