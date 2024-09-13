@@ -25,6 +25,7 @@ type Metadata struct {
 
 type MetadataInput struct {
 	SharedLinks []string `json:"sharedLinks"`
+	OutputDir   string   `json:"outputDir"`
 }
 
 type MetadataOutput struct {
@@ -74,7 +75,7 @@ func main() {
 	}
 
 	metadata := Metadata{}
-	metadataPath := path.Join(workingDir, "metadata.json")
+	metadataPath := path.Join(workingDir, ".metadata.json")
 	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 		logrus.Error("metadata.json not found")
 		os.Exit(1)
@@ -93,6 +94,10 @@ func main() {
 
 	if metadata.Output.Files == nil {
 		metadata.Output.Files = make(map[string]FileDetails)
+	}
+
+	if metadata.Input.OutputDir != "" {
+		workingDir = metadata.Input.OutputDir
 	}
 
 	if metadata.Output.Folders == nil {
