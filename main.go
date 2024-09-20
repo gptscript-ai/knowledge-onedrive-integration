@@ -246,7 +246,7 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 		if !found {
 			if metadata.Output.Files[id].FilePath != "" {
 				logrus.Infof("Deleting %s", metadata.Output.Files[id].FilePath)
-				downloadPath := path.Join(dataPath, metadata.Output.Files[id].FilePath)
+				downloadPath := metadata.Output.Files[id].FilePath
 				if err := os.RemoveAll(downloadPath); err != nil {
 					return err
 				}
