@@ -58,6 +58,8 @@ type FileDetails struct {
 }
 
 func main() {
+	logrus.SetOutput(os.Stdout)
+
 	cred := NewStaticTokenCredential(os.Getenv("GPTSCRIPT_GRAPH_MICROSOFT_COM_BEARER_TOKEN"))
 	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, []string{})
 	if err != nil {
