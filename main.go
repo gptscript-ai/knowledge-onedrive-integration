@@ -114,7 +114,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	metadata.Output.Status = "Done"
+	metadata.Output.Status = ""
 	metadata.Output.Error = ""
 	if err := writeMetadata(metadata, metadataPath); err != nil {
 		logrus.Error(err)
