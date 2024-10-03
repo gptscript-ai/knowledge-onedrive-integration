@@ -19,20 +19,33 @@ import (
 )
 
 type Metadata struct {
-	Input  MetadataInput  `json:"input"`
-	Output MetadataOutput `json:"output"`
+	Input     MetadataInput  `json:"input"`
+	Output    MetadataOutput `json:"output"`
+	OutputDir string         `json:"outputDir"`
 }
 
 type MetadataInput struct {
+	OneDriveConfig *OneDriveConfig `json:"onedriveConfig,omitempty"`
+	Exclude        []string        `json:"exclude,omitempty"`
+}
+
+type OneDriveConfig struct {
 	SharedLinks []string `json:"sharedLinks"`
-	OutputDir   string   `json:"outputDir"`
 }
 
 type MetadataOutput struct {
-	Status  string                 `json:"status"`
-	Error   string                 `json:"error"`
-	Files   map[string]FileDetails `json:"files"`
-	Folders map[string]struct{}    `json:"folders"`
+	Status string                 `json:"status"`
+	Error  string                 `json:"error"`
+	Files  map[string]FileDetails `json:"files"`
+	State  State                  `json:"state"`
+}
+
+type State struct {
+	OneDriveState *OneDriveLinksConnectorState `json:"onedriveState,omitempty"`
+}
+
+type OneDriveLinksConnectorState struct {
+	Folders map[string]struct{} `json:"folders,omitempty"`
 }
 
 type StaticTokenCredential struct {
@@ -98,12 +111,14 @@ func main() {
 		metadata.Output.Files = make(map[string]FileDetails)
 	}
 
-	if metadata.Input.OutputDir != "" {
-		workingDir = metadata.Input.OutputDir
+	if metadata.OutputDir != "" {
+		workingDir = metadata.OutputDir
 	}
 
-	if metadata.Output.Folders == nil {
-		metadata.Output.Folders = make(map[string]struct{})
+	if metadata.Output.State.OneDriveState == nil {
+		metadata.Output.State.OneDriveState = &OneDriveLinksConnectorState{
+			Folders: make(map[string]struct{}),
+		}
 	}
 
 	if err := sync(ctx, metadata, client, workingDir, metadataPath); err != nil {
@@ -127,7 +142,7 @@ func sync(ctx context.Context, metadata Metadata, client *msgraphsdk.GraphServic
 		Item models.DriveItemable
 		Root string
 	})
-	for _, link := range metadata.Input.SharedLinks {
+	for _, link := range metadata.Input.OneDriveConfig.SharedLinks {
 		requestParameters := &shares.ItemDriveItemRequestBuilderGetQueryParameters{
 			Expand: []string{"children"},
 		}
@@ -198,7 +213,14 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 	Root string
 }) error {
 	folders := make(map[string]struct{})
+	excluded := make(map[string]struct{})
+	for _, exclude := range metadata.Input.Exclude {
+		excluded[exclude] = struct{}{}
+	}
 	for _, item := range items {
+		if _, ok := excluded[*item.Item.GetId()]; ok {
+			continue
+		}
 		fullPath := getFullName(item.Item)
 		relativePath := strings.TrimPrefix(fullPath, item.Root)
 		downloadPath := path.Join(dataPath, relativePath)
@@ -232,7 +254,7 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 			}
 		}
 		folders[topRootFolder] = struct{}{}
-		metadata.Output.Folders[topRootFolder] = struct{}{}
+		metadata.Output.State.OneDriveState.Folders[topRootFolder] = struct{}{}
 		metadata.Output.Status = fmt.Sprintf("Synced %d files out of %d", len(metadata.Output.Files), len(items))
 		if err := writeMetadata(metadata, metadataPath); err != nil {
 			return err
@@ -243,7 +265,7 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 		if _, ok := items[id]; ok {
 			found = true
 		}
-		if !found {
+		if _, ok := excluded[id]; ok || !found {
 			if metadata.Output.Files[id].FilePath != "" {
 				logrus.Infof("Deleting %s", metadata.Output.Files[id].FilePath)
 				downloadPath := metadata.Output.Files[id].FilePath
@@ -255,13 +277,13 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 		}
 	}
 
-	for folder := range metadata.Output.Folders {
+	for folder := range metadata.Output.State.OneDriveState.Folders {
 		if _, ok := folders[folder]; !ok {
 			logrus.Infof("Deleting folder %s", folder)
 			if err := os.RemoveAll(strings.TrimRight(folder, "/")); err != nil {
 				return err
 			}
-			delete(metadata.Output.Folders, folder)
+			delete(metadata.Output.State.OneDriveState.Folders, folder)
 		}
 	}
 
