@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -45,7 +46,14 @@ type State struct {
 }
 
 type OneDriveLinksConnectorState struct {
-	Folders map[string]struct{} `json:"folders,omitempty"`
+	Folders map[string]struct{}  `json:"folders,omitempty"`
+	Files   map[string]FileState `json:"files,omitempty"`
+}
+
+type FileState struct {
+	FolderPath string `json:"folderPath"`
+	FileName   string `json:"fileName"`
+	URL        string `json:"url"`
 }
 
 type StaticTokenCredential struct {
@@ -118,7 +126,14 @@ func main() {
 	if metadata.Output.State.OneDriveState == nil {
 		metadata.Output.State.OneDriveState = &OneDriveLinksConnectorState{
 			Folders: make(map[string]struct{}),
+			Files:   make(map[string]FileState),
 		}
+	}
+	if metadata.Output.State.OneDriveState.Folders == nil {
+		metadata.Output.State.OneDriveState.Folders = make(map[string]struct{})
+	}
+	if metadata.Output.State.OneDriveState.Files == nil {
+		metadata.Output.State.OneDriveState.Files = make(map[string]FileState)
 	}
 
 	if err := sync(ctx, metadata, client, workingDir, metadataPath); err != nil {
@@ -214,6 +229,7 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 }) error {
 	folders := make(map[string]struct{})
 	excluded := make(map[string]struct{})
+	files := make(map[string]FileState)
 	for _, exclude := range metadata.Input.Exclude {
 		excluded[exclude] = struct{}{}
 	}
@@ -231,6 +247,11 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 			detail.URL = *item.Item.GetWebUrl()
 			detail.UpdatedAt = (*item.Item.GetLastModifiedDateTime()).String()
 			metadata.Output.Files[*item.Item.GetId()] = detail
+		}
+		files[*item.Item.GetId()] = FileState{
+			FolderPath: strings.TrimPrefix(filepath.Dir(relativePath), string(os.PathSeparator)),
+			FileName:   path.Base(downloadPath),
+			URL:        *item.Item.GetWebUrl(),
 		}
 		if _, err := os.Stat(path.Dir(downloadPath)); err != nil {
 			err := os.MkdirAll(path.Dir(downloadPath), 0755)
@@ -286,6 +307,8 @@ func saveToMetadata(ctx context.Context, metadata Metadata, client *msgraphsdk.G
 			delete(metadata.Output.State.OneDriveState.Folders, folder)
 		}
 	}
+
+	metadata.Output.State.OneDriveState.Files = files
 
 	return nil
 }
